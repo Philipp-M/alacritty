@@ -28,7 +28,6 @@ use crate::ansi::{
 };
 use crate::clipboard::{Clipboard, ClipboardType};
 use crate::config::{Config, VisualBellAnimation};
-use crate::cursor::CursorKey;
 use crate::event::{Event, EventListener};
 use crate::grid::{
     BidirectionalIterator, DisplayIter, Grid, GridCell, IndexRegion, Indexed, Scroll,
