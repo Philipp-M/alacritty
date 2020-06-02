@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-
 use font::Metrics;
 
 use alacritty_terminal::index::{Column, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Rgb;
-use alacritty_terminal::term::{RenderableCell, SizeInfo};
+use alacritty_terminal::term::SizeInfo;
+use alacritty_terminal::text_run::TextRun;
 
 #[derive(Debug, Copy, Clone)]
 pub struct RenderRect {
@@ -20,6 +19,36 @@ pub struct RenderRect {
 impl RenderRect {
     pub fn new(x: f32, y: f32, width: f32, height: f32, color: Rgb, alpha: f32) -> Self {
         RenderRect { x, y, width, height, color, alpha }
+    }
+
+    pub fn from_text_run(
+        text_run: &TextRun,
+        (descent, position, thickness): (f32, f32, f32),
+        size: &SizeInfo,
+    ) -> Self {
+        let start_point = text_run.start_point();
+        let start_x = start_point.col.0 as f32 * size.cell_width;
+        let end_x = (text_run.end_point().col.0 + 1) as f32 * size.cell_width;
+        let width = end_x - start_x;
+
+        let line_bottom = (start_point.line.0 + 1) as f32 * size.cell_height;
+        let baseline = line_bottom + descent;
+
+        // Make sure lines are always visible.
+        let height = thickness.max(1.);
+
+        let mut y = baseline - position - height / 2.;
+        let max_y = line_bottom - height;
+        y = y.min(max_y);
+
+        Self {
+            x: start_x + size.padding_x,
+            y: y + size.padding_y,
+            width,
+            height,
+            color: text_run.fg,
+            alpha: 1.,
+        }
     }
 }
 
@@ -80,57 +109,5 @@ impl RenderLine {
         }
 
         RenderRect::new(start_x + size.padding_x, y + size.padding_y, width, height, color, 1.)
-    }
-}
-
-/// Lines for underline and strikeout.
-#[derive(Default)]
-pub struct RenderLines {
-    inner: HashMap<Flags, Vec<RenderLine>>,
-}
-
-impl RenderLines {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn rects(&self, metrics: &Metrics, size: &SizeInfo) -> Vec<RenderRect> {
-        self.inner
-            .iter()
-            .map(|(flag, lines)| -> Vec<RenderRect> {
-                lines.iter().map(|line| line.rects(*flag, metrics, size)).flatten().collect()
-            })
-            .flatten()
-            .collect()
-    }
-
-    /// Update the stored lines with the next cell info.
-    pub fn update(&mut self, cell: RenderableCell) {
-        for flag in &[Flags::UNDERLINE, Flags::STRIKEOUT] {
-            if !cell.flags.contains(*flag) {
-                continue;
-            }
-
-            // Check if there's an active line.
-            if let Some(line) = self.inner.get_mut(flag).and_then(|lines| lines.last_mut()) {
-                if cell.fg == line.color
-                    && cell.column == line.end.col + 1
-                    && cell.line == line.end.line
-                {
-                    // Update the length of the line.
-                    line.end = cell.into();
-                    continue;
-                }
-            }
-
-            // Start new line if there currently is none.
-            let line = RenderLine { start: cell.into(), end: cell.into(), color: cell.fg };
-            match self.inner.get_mut(flag) {
-                Some(lines) => lines.push(line),
-                None => {
-                    self.inner.insert(*flag, vec![line]);
-                },
-            }
-        }
     }
 }

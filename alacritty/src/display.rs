@@ -29,11 +29,12 @@ use alacritty_terminal::message_bar::MessageBuffer;
 use alacritty_terminal::meter::Meter;
 use alacritty_terminal::selection::Selection;
 use alacritty_terminal::term::color::Rgb;
-use alacritty_terminal::term::{RenderableCell, SizeInfo, Term, TermMode};
+use alacritty_terminal::term::{cell::Flags, SizeInfo, Term, TermMode};
+use alacritty_terminal::text_run::TextRun;
 
 use crate::config::Config;
 use crate::event::{DisplayUpdate, Mouse};
-use crate::renderer::rects::{RenderLines, RenderRect};
+use crate::renderer::rects::RenderRect;
 use crate::renderer::{self, GlyphCache, QuadRenderer};
 use crate::url::{Url, Urls};
 use crate::window::{self, Window};
@@ -274,7 +275,11 @@ impl Display {
         config: &Config,
     ) -> Result<(GlyphCache, f32, f32), Error> {
         let font = config.font.clone();
-        let rasterizer = font::Rasterizer::new(dpr as f32, config.font.use_thin_strokes())?;
+        let rasterizer = font::Rasterizer::new(
+            dpr as f32,
+            config.font.use_thin_strokes(),
+            config.font.ligatures(),
+        )?;
 
         // Initialize glyph cache.
         let glyph_cache = {
@@ -394,7 +399,7 @@ impl Display {
         mouse: &Mouse,
         mods: ModifiersState,
     ) {
-        let grid_cells: Vec<RenderableCell> = terminal.renderable_cells(config).collect();
+        let grid_text_runs: Vec<TextRun> = terminal.text_runs(config).collect();
         let visual_bell_intensity = terminal.visual_bell.intensity();
         let background_color = terminal.background_color();
         let metrics = self.glyph_cache.font_metrics();
@@ -422,16 +427,45 @@ impl Display {
             api.clear(background_color);
         });
 
-        let mut lines = RenderLines::new();
+        // let mut lines = RenderLines::new();
         let mut urls = Urls::new();
+        let mut rects = vec![];
 
         // Draw grid.
         {
             let _sampler = self.meter.sampler();
 
             self.renderer.with_api(&config, &size_info, |mut api| {
-                // Iterate over all non-empty cells in the grid.
-                for cell in grid_cells {
+                // Iterate over all non-empty text_runs in the grid.
+                for text_run in grid_text_runs {
+                    for cell in text_run.cells() {
+                        // Update URL underlines.
+                        urls.update(size_info.cols(), cell);
+                    }
+                    // Update underline/strikeout.
+                    if text_run.flags.contains(Flags::UNDERLINE) {
+                        let underline_metrics = (
+                            metrics.descent,
+                            metrics.underline_position,
+                            metrics.underline_thickness,
+                        );
+                        rects.push(
+                            RenderRect::from_text_run(&text_run, underline_metrics, &size_info)
+                        );
+                    }
+                    if text_run.flags.contains(Flags::STRIKEOUT) {
+                        let strikeout_metrics = (
+                            metrics.descent,
+                            metrics.strikeout_position,
+                            metrics.strikeout_thickness,
+                        );
+                        rects.push(
+                            RenderRect::from_text_run(&text_run, strikeout_metrics, &size_info)
+                        );
+                    }
+                    api.render_text_run(text_run, glyph_cache);
+                }
+                /*for cell in grid_cells {
                     // Update URL underlines.
                     urls.update(size_info.cols(), cell);
 
@@ -440,11 +474,11 @@ impl Display {
 
                     // Draw the cell.
                     api.render_cell(cell, glyph_cache);
-                }
+                }*/
             });
         }
 
-        let mut rects = lines.rects(&metrics, &size_info);
+        // let mut rects = lines.rects(&metrics, &size_info);
 
         // Update visible URLs.
         self.urls = urls;

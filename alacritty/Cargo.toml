@@ -10,7 +10,7 @@ edition = "2018"
 
 [dependencies]
 alacritty_terminal = { path = "../alacritty_terminal", default-features = false }
-clap = "2"
+clap = "3.0.0-beta.1"
 log = { version = "0.4", features = ["std"] }
 time = "0.1.40"
 fnv = "1"
@@ -23,6 +23,8 @@ parking_lot = "0.10.2"
 font = { path = "../font" }
 urlocator = "0.1.3"
 copypasta = { version = "0.7.0", default-features = false }
+unicode-width = "0.1"
+libc = "0.2"
 
 [build-dependencies]
 gl_generator = "0.14.0"
