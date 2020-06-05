@@ -9,7 +9,8 @@ use font::Metrics;
 use alacritty_terminal::index::{Column, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Rgb;
-use alacritty_terminal::term::{RenderableCell, RenderableCellContent, SizeInfo};
+use alacritty_terminal::term::{RenderableCell, SizeInfo};
+use alacritty_terminal::text_run::*;
 
 use crate::config::Config;
 use crate::event::Mouse;
@@ -72,63 +73,65 @@ impl Urls {
     }
 
     // Update tracked URLs.
-    pub fn update(&mut self, num_cols: Column, cell: RenderableCell) {
+    pub fn update(&mut self, num_cols: Column, text_run: &TextRun) {
         // Convert cell to character.
-        let c = match cell.inner {
-            RenderableCellContent::Chars(chars) => chars[0],
-            RenderableCellContent::Cursor(_) => return,
-        };
-
-        let point: Point = cell.into();
-        let end = point;
-
-        // Reset URL when empty cells have been skipped.
-        if point != Point::default() && Some(point.sub(num_cols, 1)) != self.last_point {
-            self.reset();
-        }
-
-        self.last_point = Some(end);
-
-        // Extend current state if a wide char spacer is encountered.
-        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-            if let UrlLocation::Url(_, mut end_offset) = self.state {
-                if end_offset != 0 {
-                    end_offset += 1;
+        let has_wide_char_spacer = text_run.flags.contains(Flags::WIDE_CHAR_SPACER);
+        let has_wrapline = text_run.flags.contains(Flags::WRAPLINE);
+        if let TextRunContent::CharRun(run, _) = &text_run.content {
+            let mut chars = run.chars();
+            for cell in text_run.cells() {
+                let c = chars.next().unwrap();
+                let point: Point = cell.into();
+                let end = point;
+                // Reset URL when empty cells have been skipped.
+                if point != Point::default() && Some(point.sub(num_cols, 1)) != self.last_point {
+                    self.reset();
                 }
 
-                self.extend_url(point, end, cell.fg, end_offset);
+                self.last_point = Some(end);
+
+                // Extend current state if a wide char spacer is encountered.
+                if has_wide_char_spacer {
+                    if let UrlLocation::Url(_, mut end_offset) = self.state {
+                        if end_offset != 0 {
+                            end_offset += 1;
+                        }
+
+                        self.extend_url(point, end, cell.fg, end_offset);
+                    }
+
+                    continue;
+                }
+
+                // Advance parser.
+                let last_state = mem::replace(&mut self.state, self.locator.advance(c));
+                match (self.state, last_state) {
+                    (UrlLocation::Url(_length, end_offset), UrlLocation::Scheme) => {
+                        // Create empty URL.
+                        self.urls.push(Url { lines: Vec::new(), end_offset, num_cols });
+
+                        // Push schemes into URL.
+                        for scheme_cell in self.scheme_buffer.split_off(0) {
+                            let point = scheme_cell.into();
+                            self.extend_url(point, point, scheme_cell.fg, end_offset);
+                        }
+
+                        // Push the new cell into URL.
+                        self.extend_url(point, end, cell.fg, end_offset);
+                    },
+                    (UrlLocation::Url(_length, end_offset), UrlLocation::Url(..)) => {
+                        self.extend_url(point, end, cell.fg, end_offset);
+                    },
+                    (UrlLocation::Scheme, _) => self.scheme_buffer.push(cell),
+                    (UrlLocation::Reset, _) => self.reset(),
+                    _ => (),
+                }
+
+                // Reset at un-wrapped linebreak.
+                if cell.column + 1 == num_cols && !has_wrapline {
+                    self.reset();
+                }
             }
-
-            return;
-        }
-
-        // Advance parser.
-        let last_state = mem::replace(&mut self.state, self.locator.advance(c));
-        match (self.state, last_state) {
-            (UrlLocation::Url(_length, end_offset), UrlLocation::Scheme) => {
-                // Create empty URL.
-                self.urls.push(Url { lines: Vec::new(), end_offset, num_cols });
-
-                // Push schemes into URL.
-                for scheme_cell in self.scheme_buffer.split_off(0) {
-                    let point = scheme_cell.into();
-                    self.extend_url(point, point, scheme_cell.fg, end_offset);
-                }
-
-                // Push the new cell into URL.
-                self.extend_url(point, end, cell.fg, end_offset);
-            },
-            (UrlLocation::Url(_length, end_offset), UrlLocation::Url(..)) => {
-                self.extend_url(point, end, cell.fg, end_offset);
-            },
-            (UrlLocation::Scheme, _) => self.scheme_buffer.push(cell),
-            (UrlLocation::Reset, _) => self.reset(),
-            _ => (),
-        }
-
-        // Reset at un-wrapped linebreak.
-        if cell.column + 1 == num_cols && !cell.flags.contains(Flags::WRAPLINE) {
-            self.reset();
         }
     }
 
@@ -198,6 +201,7 @@ mod tests {
 
     use alacritty_terminal::index::{Column, Line};
     use alacritty_terminal::term::cell::MAX_ZEROWIDTH_CHARS;
+    use alacritty_terminal::term::RenderableCellContent;
 
     fn text_to_cells(text: &str) -> Vec<RenderableCell> {
         text.chars()
@@ -218,13 +222,13 @@ mod tests {
     fn multi_color_url() {
         let mut input = text_to_cells("test https://example.org ing");
         let num_cols = input.len();
-
         input[10].fg = Rgb { r: 0xff, g: 0x00, b: 0xff };
+        let iter = TextRunIter::new(input.into_iter());
 
         let mut urls = Urls::new();
 
-        for cell in input {
-            urls.update(Column(num_cols), cell);
+        for text_run in iter {
+            urls.update(Column(num_cols), &text_run);
         }
 
         let url = urls.urls.first().unwrap();
@@ -236,11 +240,12 @@ mod tests {
     fn multiple_urls() {
         let input = text_to_cells("test git:a git:b git:c ing");
         let num_cols = input.len();
+        let iter = TextRunIter::new(input.into_iter());
 
         let mut urls = Urls::new();
 
-        for cell in input {
-            urls.update(Column(num_cols), cell);
+        for text_run in iter {
+            urls.update(Column(num_cols), &text_run);
         }
 
         assert_eq!(urls.urls.len(), 3);

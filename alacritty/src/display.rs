@@ -438,10 +438,8 @@ impl Display {
             self.renderer.with_api(&config, &size_info, |mut api| {
                 // Iterate over all non-empty text_runs in the grid.
                 for text_run in grid_text_runs {
-                    for cell in text_run.cells() {
-                        // Update URL underlines.
-                        urls.update(size_info.cols(), cell);
-                    }
+                    // Update URL underlines.
+                    urls.update(size_info.cols(), &text_run);
                     // Update underline/strikeout.
                     if text_run.flags.contains(Flags::UNDERLINE) {
                         let underline_metrics = (
@@ -449,9 +447,11 @@ impl Display {
                             metrics.underline_position,
                             metrics.underline_thickness,
                         );
-                        rects.push(
-                            RenderRect::from_text_run(&text_run, underline_metrics, &size_info)
-                        );
+                        rects.push(RenderRect::from_text_run(
+                            &text_run,
+                            underline_metrics,
+                            &size_info,
+                        ));
                     }
                     if text_run.flags.contains(Flags::STRIKEOUT) {
                         let strikeout_metrics = (
@@ -459,26 +459,16 @@ impl Display {
                             metrics.strikeout_position,
                             metrics.strikeout_thickness,
                         );
-                        rects.push(
-                            RenderRect::from_text_run(&text_run, strikeout_metrics, &size_info)
-                        );
+                        rects.push(RenderRect::from_text_run(
+                            &text_run,
+                            strikeout_metrics,
+                            &size_info,
+                        ));
                     }
                     api.render_text_run(text_run, glyph_cache);
                 }
-                /*for cell in grid_cells {
-                    // Update URL underlines.
-                    urls.update(size_info.cols(), cell);
-
-                    // Update underline/strikeout.
-                    lines.update(cell);
-
-                    // Draw the cell.
-                    api.render_cell(cell, glyph_cache);
-                }*/
             });
         }
-
-        // let mut rects = lines.rects(&metrics, &size_info);
 
         // Update visible URLs.
         self.urls = urls;
