@@ -236,6 +236,7 @@ where
 {
     type Item = TextRun;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let mut output = None;
         while let Some(render_cell) = self.iter.next() {

@@ -1156,13 +1156,6 @@ impl<'a, C> RenderApi<'a, C> {
                     text_run.cells().zip(shaped_glyphs).zip(zero_widths.iter())
                 {
                     self.add_render_item(cell, &glyph);
-                    // Add empty spacer for full width characters
-                    if text_run.flags.contains(Flags::WIDE_CHAR) {
-                        self.add_render_item(
-                            RenderableCell { column: cell.column + 1, ..cell },
-                            &Glyph::default(),
-                        );
-                    }
                     self.render_zero_widths(
                         zero_width_chars.iter().filter(|c| **c != ' '),
                         cell,
