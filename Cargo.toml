@@ -11,4 +11,4 @@ debug = 1
 incremental = false
 
 [patch.crates-io]
-freetype = { path = "freetype" }
+freetype = { git = "https://github.com/servo/rust-freetype.git" }
