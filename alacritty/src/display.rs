@@ -427,7 +427,6 @@ impl Display {
             api.clear(background_color);
         });
 
-        // let mut lines = RenderLines::new();
         let mut urls = Urls::new();
         let mut rects = vec![];
 

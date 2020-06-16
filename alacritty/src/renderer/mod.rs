@@ -174,6 +174,39 @@ pub struct GlyphCache {
     metrics: font::Metrics,
 }
 
+struct GlyphKeyIter<I> {
+    iter: I,
+    chars: Vec<Option<char>>,
+    font_size: font::Size,
+    font_key: FontKey,
+}
+
+impl<I> Iterator for GlyphKeyIter<I>
+where
+    I: Iterator<Item = (u32, u32)>,
+{
+    type Item = GlyphKey;
+
+    #[inline]
+    fn next(&mut self) -> Option<GlyphKey> {
+        let (codepoint, cluster) = match self.iter.next() {
+            Some(v) => v,
+            None => return None,
+        };
+
+        // Codepoint of 0 indicates a missing or undefined glyph
+        let id: font::KeyType = if codepoint == 0 {
+            self.chars[cluster as usize]
+                .unwrap_or_else(|| panic!("Could not find cluster {}", cluster))
+                .into()
+        } else {
+            codepoint.into()
+        };
+
+        Some(GlyphKey { id, font_key: self.font_key, size: self.font_size })
+    }
+}
+
 impl GlyphCache {
     pub fn new<L>(
         mut rasterizer: Rasterizer,
@@ -279,68 +312,41 @@ impl GlyphCache {
     // Since shaping is not available on Windows/Mac OSX, text run glyphs are rasterized
     // one by one as characters
     #[cfg(any(target_os = "macos", windows))]
-    fn shape_run<'a, L>(
+    fn shape_run<'a>(
         &'a mut self,
         text_run: &str,
         font_key: FontKey,
-        loader: &'a mut L,
-    ) -> Vec<Glyph>
-    where
-        L: LoadGlyph,
-    {
-        text_run.chars().map(|c| {
-            let glyph_key = GlyphKey { id: c.into(), font_key, size: self.font_size };
-            *self.get(glyph_key, loader)
-        })
+    ) -> impl Iterator<Item = GlyphKey> + 'a {
+        text_run.chars().map(|c| GlyphKey { id: c.into(), font_key, size: self.font_size })
     }
 
     // Shape using harfbuzz
     #[cfg(not(any(target_os = "macos", windows)))]
-    pub fn shape_run<'a, L>(
+    pub fn shape_run<'a>(
         &'a mut self,
         text_run: &'a str,
         font_key: FontKey,
-        loader: &'a mut L,
-    ) -> Vec<Glyph>
-    where
-        L: LoadGlyph,
-    {
-        self.rasterizer
+    ) -> impl Iterator<Item = GlyphKey> {
+        let mut chars: Vec<Option<char>> = vec![None; text_run.len()];
+        for (i, c) in text_run.char_indices() {
+            chars[i] = Some(c);
+        }
+        let iter = self
+            .rasterizer
             .shape(text_run, font_key)
             .get_glyph_infos()
             .iter()
-            .map(move |glyph_info| {
-                let codepoint = glyph_info.codepoint;
-
-                // Codepoint of 0 indicates a missing or undefined glyph
-                let id: font::KeyType = if codepoint == 0 {
-                    Self::find_fallback_char(text_run, glyph_info.cluster as usize)
-                } else {
-                    codepoint.into()
-                };
-
-                let glyph_key = GlyphKey { id, font_key, size: self.font_size };
-                *self.get(glyph_key, loader)
-            })
-            .collect()
-    }
-
-    #[cfg(not(any(target_os = "macos", windows)))]
-    fn find_fallback_char(text_run: &str, index: usize) -> font::KeyType {
-        // TODO: this is a linear scan over text_run for each missing glyph.
-        // Try to find all missing glyphs first and only scan over text_run once.
-        text_run
-            .char_indices()
-            .find_map(|(i, c)| if i == index { Some(c) } else { None })
-            .unwrap_or_else(|| panic!("Could not find cluster {} in run {}", index, text_run))
-            .into()
+            .map(|info| (info.codepoint, info.cluster))
+            .collect::<Vec<_>>()
+            .into_iter();
+        GlyphKeyIter { iter, chars, font_size: self.font_size, font_key }
     }
 
     pub fn get<L>(&mut self, glyph_key: GlyphKey, loader: &mut L) -> &Glyph
     where
         L: LoadGlyph,
     {
-        let glyph_offset = self.glyph_offset;
+        let glyph_offset = &self.glyph_offset;
         let rasterizer = &mut self.rasterizer;
         let metrics = &self.metrics;
         self.cache.entry(glyph_key).or_insert_with(|| {
@@ -1051,7 +1057,6 @@ impl<'a, C> RenderApi<'a, C> {
         color: Option<Rgb>,
     ) {
         let bg_alpha = color.map(|_| 1.0).unwrap_or(0.0);
-        // let str_length: usize = string.chars().map(|_| 1).sum();
         let str_length = string.chars().count();
         let text_run = TextRun {
             line,
@@ -1123,9 +1128,9 @@ impl<'a, C> RenderApi<'a, C> {
     ) where
         I: Iterator<Item = &'r char>,
     {
+        let average_advance = glyph_cache.metrics.average_advance as f32;
         for c in zero_width_chars {
             let glyph_key = GlyphKey { font_key, size: glyph_cache.font_size, id: (*c).into() };
-            let average_advance = glyph_cache.metrics.average_advance as f32;
             let mut glyph = *glyph_cache.get(glyph_key, self);
 
             // The metrics of zero-width characters are based on rendering
@@ -1146,47 +1151,33 @@ impl<'a, C> RenderApi<'a, C> {
             TextRunContent::CharRun(run, zero_widths) => {
                 // Get font key for cell
                 let font_key = Self::determine_font_key(text_run.flags, glyph_cache);
-                let shaped_glyphs = if text_run.flags.contains(Flags::HIDDEN) {
-                    GlyphIter::Hidden
+                if text_run.flags.contains(Flags::HIDDEN) {
+                    let glyph = Glyph::default();
+                    for (cell, zero_width_chars) in text_run.cells().zip(zero_widths.iter()) {
+                        self.add_render_item(cell, &glyph);
+                        self.render_zero_widths(
+                            zero_width_chars.iter().filter(|c| **c != ' '),
+                            cell,
+                            font_key,
+                            glyph_cache,
+                        );
+                    }
                 } else {
-                    GlyphIter::Shaped(glyph_cache.shape_run(&run, font_key, self).into_iter())
-                };
-
-                for ((cell, glyph), zero_width_chars) in
-                    text_run.cells().zip(shaped_glyphs).zip(zero_widths.iter())
-                {
-                    self.add_render_item(cell, &glyph);
-                    self.render_zero_widths(
-                        zero_width_chars.iter().filter(|c| **c != ' '),
-                        cell,
-                        font_key,
-                        glyph_cache,
-                    );
+                    let glyph_keys = glyph_cache.shape_run(&run, font_key);
+                    for ((cell, key), zero_width_chars) in
+                        text_run.cells().zip(glyph_keys).zip(zero_widths.iter())
+                    {
+                        let glyph = glyph_cache.get(key, self);
+                        self.add_render_item(cell, glyph);
+                        self.render_zero_widths(
+                            zero_width_chars.iter().filter(|c| **c != ' '),
+                            cell,
+                            font_key,
+                            glyph_cache,
+                        );
+                    }
                 }
             },
-        }
-    }
-}
-
-/// Abstracts iteration over a runof hidden glyphs or shaped glyphs.
-enum GlyphIter<I> {
-    /// Our run was not hidden and our glyphs were shaped
-    Shaped(I),
-    /// Our run is hidden and was not shaped
-    Hidden,
-}
-
-// never ends for default
-impl<I> Iterator for GlyphIter<I>
-where
-    I: Iterator<Item = Glyph>,
-{
-    type Item = Glyph;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            GlyphIter::Shaped(inner) => inner.next(),
-            GlyphIter::Hidden => Some(Glyph::default()),
         }
     }
 }

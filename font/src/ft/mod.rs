@@ -84,7 +84,7 @@ pub struct FreeTypeRasterizer {
     ft_faces: HashMap<FTFaceLocation, Rc<FTFace>>,
     fallback_lists: HashMap<FontKey, FallbackList>,
     device_pixel_ratio: f32,
-    use_font_ligatures: bool,
+    features: Vec<Feature>,
 }
 
 #[inline]
@@ -102,14 +102,18 @@ impl Rasterize for FreeTypeRasterizer {
 
     fn new(device_pixel_ratio: f32, _: bool, ligatures: bool) -> Result<FreeTypeRasterizer, Error> {
         let library = Library::init()?;
-
+        let use_font_ligatures = if ligatures { 1 } else { 0 };
+        let features = vec![
+            Feature::new(Tag::new('l', 'i', 'g', 'a'), use_font_ligatures, ..),
+            Feature::new(Tag::new('c', 'a', 'l', 't'), use_font_ligatures, ..),
+        ];
         Ok(FreeTypeRasterizer {
             faces: HashMap::new(),
             ft_faces: HashMap::new(),
             fallback_lists: HashMap::new(),
             library,
             device_pixel_ratio,
-            use_font_ligatures: ligatures,
+            features,
         })
     }
 
@@ -175,12 +179,7 @@ impl crate::HbFtExt for FreeTypeRasterizer {
     fn shape(&mut self, text: &str, font_key: FontKey) -> GlyphBuffer {
         let hb_font = &self.faces[&font_key].hb_font;
         let buf = UnicodeBuffer::new().add_str(text);
-        let use_font_ligatures = if self.use_font_ligatures { 1 } else { 0 };
-        let features = [
-            Feature::new(Tag::new('l', 'i', 'g', 'a'), use_font_ligatures, ..),
-            Feature::new(Tag::new('c', 'a', 'l', 't'), use_font_ligatures, ..),
-        ];
-        harfbuzz_rs::shape(hb_font, buf, &features)
+        harfbuzz_rs::shape(hb_font, buf, &self.features)
     }
 }
 

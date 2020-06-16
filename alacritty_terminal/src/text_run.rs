@@ -167,9 +167,9 @@ impl<I> TextRunIter<I> {
         }
     }
 
-    /// Empty out pending buffer producing owned collections that can be mved into a TextRun.
+    /// Empty out pending buffer producing owned collections that can be moved into a TextRun.
     fn drain_buffer(&mut self) -> (String, Vec<[char; MAX_ZEROWIDTH_CHARS]>) {
-        (self.buffer_text.drain(..).collect(), self.buffer_zero_width.drain(..).collect())
+        (self.buffer_text.split_off(0), self.buffer_zero_width.split_off(0))
     }
 
     /// Start a new run by setting latest_col, run_start and buffering content of rc.
