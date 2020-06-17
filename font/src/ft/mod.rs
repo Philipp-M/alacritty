@@ -394,12 +394,15 @@ impl FreeTypeRasterizer {
     }
 
     fn face_for_glyph(&mut self, glyph_key: GlyphKey) -> FontKey {
-        match glyph_key.id {
-            // We already found a glyph index, use current font
-            KeyType::GlyphIndex(_) | KeyType::Placeholder => glyph_key.font_key,
-            // Harfbuzz failed to find a glyph index, try to load a font for c
-            KeyType::Char(_) => self.load_face_with_glyph(glyph_key).unwrap_or(glyph_key.font_key),
+        if let KeyType::Char(c) = glyph_key.id {
+            if let Some(face) = self.faces.get(&glyph_key.font_key) {
+                let index = face.ft_face.get_char_index(c as usize);
+                if index != 0 {
+                    return glyph_key.font_key;
+                }
+            }
         }
+        self.load_face_with_glyph(glyph_key).unwrap_or(glyph_key.font_key)
     }
 
     fn load_face_with_glyph(&mut self, glyph: GlyphKey) -> Result<FontKey, Error> {

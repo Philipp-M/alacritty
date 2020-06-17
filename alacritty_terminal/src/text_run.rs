@@ -94,14 +94,6 @@ impl TextRun {
     pub fn end_point(&self) -> Point {
         Point { line: self.line, col: self.span.1 }
     }
-
-    /// Iterates over RenderableCell in column range [run.0, run.1]
-    pub fn cells<'a>(&'a self) -> impl Iterator<Item = RenderableCell> + 'a {
-        let step = if self.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
-        let (Column(start), Column(end)) = self.span;
-        // TODO: impl Step for Column (once Step is stable) to avoid unwrapping the rewrapping.
-        (start..=end).step_by(step).map(move |col| self.dummy_cell_at(Column(col)))
-    }
 }
 
 type IsWide = bool;
@@ -240,6 +232,12 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         let mut output = None;
         while let Some(render_cell) = self.iter.next() {
+            // Render tabs as spaces in case the font doesn't support it.
+            if let RenderableCellContent::Chars(mut chars) = render_cell.inner {
+                if chars[0] == '\t' {
+                    chars[0] = ' ';
+                }
+            }
             if self.latest_col.is_none() || self.run_start.is_none() {
                 // Initail state, this should only be hit on the first next() call of
                 // iterator

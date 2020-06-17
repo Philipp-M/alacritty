@@ -78,9 +78,9 @@ impl Urls {
         let has_wide_char_spacer = text_run.flags.contains(Flags::WIDE_CHAR_SPACER);
         let has_wrapline = text_run.flags.contains(Flags::WRAPLINE);
         if let TextRunContent::CharRun(run, _) = &text_run.content {
-            let mut chars = run.chars();
-            for cell in text_run.cells() {
-                let c = chars.next().unwrap();
+            let step = if text_run.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+            let mut cell = text_run.start_cell();
+            for c in run.chars() {
                 let point: Point = cell.into();
                 let end = point;
                 // Reset URL when empty cells have been skipped.
@@ -131,6 +131,7 @@ impl Urls {
                 if cell.column + 1 == num_cols && !has_wrapline {
                     self.reset();
                 }
+                cell.column += step;
             }
         }
     }
