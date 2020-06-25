@@ -139,7 +139,9 @@ impl From<RenderableCell> for Point<Line> {
 /// A line.
 ///
 /// Newtype to avoid passing values incorrectly.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    Hash, Debug, Copy, Clone, Eq, PartialEq, Default, Ord, PartialOrd, Serialize, Deserialize,
+)]
 pub struct Line(pub usize);
 
 impl fmt::Display for Line {
@@ -151,7 +153,9 @@ impl fmt::Display for Line {
 /// A column.
 ///
 /// Newtype to avoid passing values incorrectly.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    Hash, Debug, Copy, Clone, Eq, PartialEq, Default, Ord, PartialOrd, Serialize, Deserialize,
+)]
 pub struct Column(pub usize);
 
 impl fmt::Display for Column {

@@ -1,8 +1,11 @@
 //! The display subsystem including window management, font rasterization, and
 //! GPU drawing.
 
+use rustc_hash::FxHasher;
+use std::collections::HashSet;
 use std::f64;
 use std::fmt::{self, Formatter};
+use std::hash::BuildHasherDefault;
 #[cfg(not(any(target_os = "macos", windows)))]
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -114,6 +117,7 @@ pub struct Display {
 
     renderer: QuadRenderer,
     glyph_cache: GlyphCache,
+    text_run_cache: HashSet<TextRun, BuildHasherDefault<FxHasher>>,
     meter: Meter,
     #[cfg(not(any(target_os = "macos", windows)))]
     is_x11: bool,
@@ -266,6 +270,7 @@ impl Display {
             is_x11,
             #[cfg(not(any(target_os = "macos", windows)))]
             wayland_event_queue,
+            text_run_cache: HashSet::default(),
         })
     }
 
@@ -342,6 +347,7 @@ impl Display {
         } else if update_pending.cursor {
             self.clear_glyph_cache();
         }
+        self.text_run_cache.clear();
 
         let cell_width = self.size_info.cell_width;
         let cell_height = self.size_info.cell_height;
@@ -433,10 +439,15 @@ impl Display {
         // Draw grid.
         {
             let _sampler = self.meter.sampler();
+            let text_run_cache = &mut self.text_run_cache;
+
+            let mut new_set = HashSet::default();
 
             self.renderer.with_api(&config, &size_info, |mut api| {
+                let grid_length = grid_text_runs.len();
+                let mut hit = 0;
                 // Iterate over all non-empty text_runs in the grid.
-                for text_run in grid_text_runs {
+                for mut text_run in grid_text_runs.into_iter() {
                     // Update URL underlines.
                     urls.update(size_info.cols(), &text_run);
                     // Update underline/strikeout.
@@ -464,8 +475,50 @@ impl Display {
                             &size_info,
                         ));
                     }
-                    api.render_text_run(text_run, glyph_cache);
+                    if config.font.ligatures() {
+                        #[cfg(not(any(target_os = "macos", windows)))]
+                        {
+                            if let Some(text_run_with_data) = text_run_cache.get(&text_run) {
+                                hit += 1;
+                                if let Some(data) = &text_run_with_data.data {
+                                    let mut data = data.clone();
+                                    if text_run_with_data.line != text_run.line {
+                                        for (cell, _) in &mut data {
+                                            cell.line = text_run.line;
+                                        }
+                                    }
+                                    let start = text_run_with_data.span.0;
+                                    if start != text_run.span.0 {
+                                        for (cell, _) in &mut data {
+                                            cell.column = text_run.span.0 + cell.column - start;
+                                        }
+                                    }
+                                    if text_run_with_data.fg != text_run.fg {
+                                        for (cell, _) in &mut data {
+                                            cell.fg = text_run.fg;
+                                        }
+                                    }
+                                    if text_run_with_data.bg != text_run.bg {
+                                        for (cell, _) in &mut data {
+                                            cell.bg = text_run.bg;
+                                        }
+                                    }
+                                    text_run.data = Some(data);
+                                }
+                                api.render_text_run_with_data(&text_run, glyph_cache);
+                                new_set.insert(text_run);
+                            } else {
+                                let data = api.render_text_run_with_data(&text_run, glyph_cache);
+                                text_run.data = data;
+                                new_set.insert(text_run);
+                            }
+                        }
+                    } else {
+                        api.render_text_run(&text_run, glyph_cache);
+                    }
                 }
+                *text_run_cache = new_set;
+                info!("hit rate: {:.3}, total {}", hit as f64 / grid_length as f64, grid_length);
             });
         }
 

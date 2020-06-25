@@ -29,3 +29,8 @@ pub mod vi_mode;
 
 pub use crate::grid::Grid;
 pub use crate::term::Term;
+
+mod gl {
+    #![allow(clippy::all)]
+    include!(concat!(env!("OUT_DIR"), "/gl_bindings.rs"));
+}

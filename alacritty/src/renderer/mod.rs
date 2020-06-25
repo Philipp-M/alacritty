@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::hash::BuildHasherDefault;
 use std::io;
@@ -8,7 +9,6 @@ use std::ptr;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use fnv::FnvHasher;
 #[cfg(not(any(target_os = "macos", windows)))]
 use font::HbFtExt;
 use font::{
@@ -17,6 +17,7 @@ use font::{
 };
 use log::{error, info};
 use notify::{watcher, DebouncedEvent, RecursiveMode, Watcher};
+use rustc_hash::FxHasher;
 
 use crate::cursor;
 use crate::gl;
@@ -27,10 +28,9 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Flags, MAX_ZEROWIDTH_CHARS};
 use alacritty_terminal::term::color::Rgb;
 use alacritty_terminal::term::{self, CursorKey, RenderableCell, SizeInfo};
+pub use alacritty_terminal::text_run::Glyph;
 use alacritty_terminal::text_run::{TextRun, TextRunContent};
 use alacritty_terminal::util;
-use std::fmt::{self, Display, Formatter};
-
 pub mod rects;
 
 // Shader paths for live reload.
@@ -124,30 +124,16 @@ pub struct RectShaderProgram {
     u_color: GLint,
 }
 
-#[derive(Copy, Debug, Clone, Default)]
-pub struct Glyph {
-    tex_id: GLuint,
-    colored: bool,
-    top: f32,
-    left: f32,
-    width: f32,
-    height: f32,
-    uv_bot: f32,
-    uv_left: f32,
-    uv_width: f32,
-    uv_height: f32,
-}
-
 /// Naïve glyph cache.
 ///
 /// Currently only keyed by `char`, and thus not possible to hold different
 /// representations of the same code point.
 pub struct GlyphCache {
     /// Cache of buffered glyphs.
-    cache: HashMap<GlyphKey, Glyph, BuildHasherDefault<FnvHasher>>,
+    cache: HashMap<GlyphKey, Glyph, BuildHasherDefault<FxHasher>>,
 
     /// Cache of buffered cursor glyphs.
-    cursor_cache: HashMap<CursorKey, Glyph, BuildHasherDefault<FnvHasher>>,
+    cursor_cache: HashMap<CursorKey, Glyph, BuildHasherDefault<FxHasher>>,
 
     /// Rasterizer for loading new glyphs.
     rasterizer: Rasterizer,
@@ -172,9 +158,6 @@ pub struct GlyphCache {
 
     /// Font metrics.
     metrics: font::Metrics,
-
-    /// Ligature support.
-    pub ligatures: bool,
 }
 
 struct GlyphKeyIter<I> {
@@ -243,12 +226,7 @@ impl GlyphCache {
             bold_italic_key: bold_italic,
             glyph_offset: font.glyph_offset,
             metrics,
-            ligatures: false,
         };
-        #[cfg(not(any(target_os = "macos", windows)))]
-        {
-            cache.ligatures = font.ligatures();
-        }
 
         cache.load_common_glyphs(loader);
 
@@ -373,10 +351,6 @@ impl GlyphCache {
         self.italic_key = italic;
         self.bold_italic_key = bold_italic;
         self.metrics = metrics;
-        #[cfg(not(any(target_os = "macos", windows)))]
-        {
-            self.ligatures = font.ligatures();
-        }
 
         self.clear_glyph_cache(loader);
 
@@ -567,7 +541,7 @@ impl Batch {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.instances.is_empty()
     }
 
     #[inline]
@@ -1051,8 +1025,9 @@ impl<'a, C> RenderApi<'a, C> {
             bg: color.unwrap_or(Rgb { r: 0, g: 0, b: 0 }),
             flags: Flags::empty(),
             bg_alpha,
+            data: None,
         };
-        self.render_text_run(text_run, glyph_cache);
+        self.render_text_run(&text_run, glyph_cache);
     }
 
     #[inline]
@@ -1091,6 +1066,29 @@ impl<'a, C> RenderApi<'a, C> {
         self.add_render_item(start_cell, &glyph);
     }
 
+    #[cfg(not(any(target_os = "macos", windows)))]
+    fn render_cursor_with_data(
+        &mut self,
+        start_cell: &RenderableCell,
+        cursor_key: CursorKey,
+        glyph_cache: &mut GlyphCache,
+    ) -> (RenderableCell, Glyph) {
+        // Raw cell pixel buffers like cursors don't need to go through font lookup
+        let metrics = glyph_cache.metrics;
+        let glyph = glyph_cache.cursor_cache.entry(cursor_key).or_insert_with(|| {
+            self.load_glyph(&cursor::get_cursor_glyph(
+                cursor_key.style,
+                metrics,
+                self.config.font.offset.x,
+                self.config.font.offset.y,
+                cursor_key.is_wide,
+                self.config.cursor.thickness(),
+            ))
+        });
+        self.add_render_item(start_cell, &glyph);
+        (*start_cell, *glyph)
+    }
+
     #[inline]
     fn determine_font_key(flags: Flags, glyph_cache: &GlyphCache) -> FontKey {
         // FIXME this is super inefficient.
@@ -1126,11 +1124,40 @@ impl<'a, C> RenderApi<'a, C> {
         }
     }
 
-    pub fn render_text_run(&mut self, text_run: TextRun, glyph_cache: &mut GlyphCache) {
+    #[cfg(not(any(target_os = "macos", windows)))]
+    fn render_zero_widths_with_data<'r, I>(
+        &mut self,
+        zero_width_chars: I,
+        cell: &RenderableCell,
+        font_key: FontKey,
+        glyph_cache: &mut GlyphCache,
+    ) -> Vec<(RenderableCell, Glyph)>
+    where
+        I: Iterator<Item = &'r char>,
+    {
+        let average_advance = glyph_cache.metrics.average_advance as f32;
+        let mut result = vec![];
+        for c in zero_width_chars {
+            let glyph_key = GlyphKey { font_key, size: glyph_cache.font_size, id: (*c).into() };
+            let mut glyph = *glyph_cache.get(glyph_key, self);
+
+            // The metrics of zero-width characters are based on rendering
+            // the character after the current cell, with the anchor at the
+            // right side of the preceding character. Since we render the
+            // zero-width characters inside the preceding character, the
+            // anchor has been moved to the right by one cell.
+            glyph.left += average_advance;
+            self.add_render_item(cell, &glyph);
+            result.push((*cell, glyph));
+        }
+        result
+    }
+
+    pub fn render_text_run(&mut self, text_run: &TextRun, glyph_cache: &mut GlyphCache) {
         let mut cell = text_run.start_cell();
         match &text_run.content {
             TextRunContent::Cursor(cursor_key) => {
-                self.render_cursor(&cell, *cursor_key, glyph_cache)
+                self.render_cursor(&cell, *cursor_key, glyph_cache);
             },
             TextRunContent::CharRun(run, zero_widths) => {
                 // Get font key for cell
@@ -1151,49 +1178,124 @@ impl<'a, C> RenderApi<'a, C> {
                 } else {
                     let mut key = GlyphKey { id: 0.into(), font_key, size: glyph_cache.font_size };
                     let mut iter = zero_widths.iter();
-                    if glyph_cache.ligatures {
+                    for c in run.chars() {
+                        let zero_width_chars = iter.next().unwrap();
+                        key.id = c.into();
+                        let glyph = glyph_cache.get(key, self);
+                        self.add_render_item(&cell, glyph);
+                        self.render_zero_widths(
+                            zero_width_chars.iter().filter(|c| **c != ' '),
+                            &cell,
+                            font_key,
+                            glyph_cache,
+                        );
+                        cell.column += step;
+                    }
+                }
+            },
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    pub fn render_text_run_with_data(
+        &mut self,
+        text_run: &TextRun,
+        glyph_cache: &mut GlyphCache,
+    ) -> Option<Vec<(RenderableCell, Glyph)>> {
+        if let Some(data) = &text_run.data {
+            for (cell, glyph) in data {
+                self.add_render_item(&cell, &glyph);
+            }
+            return None;
+        }
+        let mut cell = text_run.start_cell();
+        let mut result = vec![];
+        match &text_run.content {
+            TextRunContent::Cursor(cursor_key) => {
+                let (cell, glyph) = self.render_cursor_with_data(&cell, *cursor_key, glyph_cache);
+                result.push((cell, glyph));
+                Some(result)
+            },
+            TextRunContent::CharRun(run, zero_widths) => {
+                // Get font key for cell
+                let font_key = Self::determine_font_key(text_run.flags, glyph_cache);
+                let step = if text_run.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+                if text_run.flags.contains(Flags::HIDDEN) {
+                    let glyph = Glyph::default();
+                    for zero_width_chars in zero_widths.iter() {
+                        self.add_render_item(&cell, &glyph);
+                        result.push((cell, glyph));
+                        let zw = self.render_zero_widths_with_data(
+                            zero_width_chars.iter().filter(|c| **c != ' '),
+                            &cell,
+                            font_key,
+                            glyph_cache,
+                        );
+                        result.extend(zw);
+                        cell.column += step;
+                    }
+                    Some(result)
+                } else {
+                    let mut key = GlyphKey { id: 0.into(), font_key, size: glyph_cache.font_size };
+                    let mut iter = zero_widths.iter();
+                    if run.len() > 1 && run.trim().len() > 1 {
                         let mut chars = vec![None; run.len()];
+                        let mut zeros = vec![None; run.len()];
                         for (i, c) in run.char_indices() {
                             chars[i] = Some(c);
+                            zeros[i] = Some(iter.next().unwrap());
                         }
-                        let buffer = glyph_cache.rasterizer.shape(run, font_key);
+                        let buffer = glyph_cache.rasterizer.shape(&run, font_key);
                         let infos = buffer.get_glyph_infos();
+                        let empty = [char::default(); MAX_ZEROWIDTH_CHARS];
                         for info in infos {
-                            let zero_width_chars = iter.next().unwrap();
                             let codepoint = info.codepoint;
                             let cluster = info.cluster;
-                            let id: font::KeyType = if codepoint == 0 {
-                                chars[cluster as usize]
-                                    .unwrap_or_else(|| panic!("Couldn't find cluster {}", cluster))
-                                    .into()
+                            let (id, zero_width_chars): (font::KeyType, _) = if codepoint == 0 {
+                                (
+                                    chars[cluster as usize]
+                                        .unwrap_or_else(|| {
+                                            panic!("Couldn't find cluster {}", cluster)
+                                        })
+                                        .into(),
+                                    zeros[cluster as usize].unwrap_or_else(|| {
+                                        panic!("Couldn't find zero_width_chars")
+                                    }),
+                                )
                             } else {
-                                codepoint.into()
+                                (codepoint.into(), zeros[cluster as usize].unwrap_or(&empty))
                             };
                             key.id = id;
                             let glyph = glyph_cache.get(key, self);
                             self.add_render_item(&cell, glyph);
-                            self.render_zero_widths(
+                            result.push((cell, *glyph));
+                            let zw = self.render_zero_widths_with_data(
                                 zero_width_chars.iter().filter(|c| **c != ' '),
                                 &cell,
                                 font_key,
                                 glyph_cache,
                             );
+                            result.extend(zw);
                             cell.column += step;
                         }
+                        Some(result)
                     } else {
                         for c in run.chars() {
                             let zero_width_chars = iter.next().unwrap();
                             key.id = c.into();
                             let glyph = glyph_cache.get(key, self);
                             self.add_render_item(&cell, glyph);
-                            self.render_zero_widths(
+                            result.push((cell, *glyph));
+                            let zw = self.render_zero_widths_with_data(
                                 zero_width_chars.iter().filter(|c| **c != ' '),
                                 &cell,
                                 font_key,
                                 glyph_cache,
                             );
+                            result.extend(zw);
                             cell.column += step;
                         }
+                        Some(result)
                     }
                 }
             },

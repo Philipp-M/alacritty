@@ -1,7 +1,25 @@
+use std::cmp::{Eq, PartialEq};
+use std::hash::{Hash, Hasher};
+
+use crate::gl::types::*;
 use crate::index::{Column, Line, Point};
 use crate::term::cell::{Flags, MAX_ZEROWIDTH_CHARS};
 use crate::term::color::Rgb;
 use crate::term::{CursorKey, RenderableCell, RenderableCellContent};
+
+#[derive(Copy, Debug, Clone, Default)]
+pub struct Glyph {
+    pub tex_id: GLuint,
+    pub colored: bool,
+    pub top: f32,
+    pub left: f32,
+    pub width: f32,
+    pub height: f32,
+    pub uv_bot: f32,
+    pub uv_left: f32,
+    pub uv_width: f32,
+    pub uv_height: f32,
+}
 
 #[derive(Debug)]
 struct RunStart {
@@ -25,7 +43,7 @@ impl RunStart {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Hash, Clone, PartialEq, Eq)]
 pub enum TextRunContent {
     Cursor(CursorKey),
     CharRun(String, Vec<[char; MAX_ZEROWIDTH_CHARS]>),
@@ -35,7 +53,7 @@ pub enum TextRunContent {
 /// The assumption is that if two cells are in the same TextRun they can be sent off together to
 /// be shaped. This allows for ligatures to be rendered but not when something breaks up a ligature
 /// (e.g. selection highlight) which is desired behavior.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TextRun {
     /// A run never spans multiple lines.
     pub line: Line,
@@ -51,7 +69,29 @@ pub struct TextRun {
     pub bg_alpha: f32,
     /// Attributes of this text run.
     pub flags: Flags,
+    /// cached glyph and cell for rendering.
+    pub data: Option<Vec<(RenderableCell, Glyph)>>,
 }
+
+impl Hash for TextRun {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.span.1 - self.span.0).hash(state);
+        self.content.hash(state);
+        self.bg_alpha.to_bits().hash(state);
+        self.flags.hash(state);
+    }
+}
+
+impl PartialEq for TextRun {
+    fn eq(&self, other: &Self) -> bool {
+        (self.span.1 - self.span.0) == (other.span.1 - other.span.0)
+            && self.content == other.content
+            && self.bg_alpha.to_bits() == other.bg_alpha.to_bits()
+            && self.flags == other.flags
+    }
+}
+
+impl Eq for TextRun {}
 
 impl TextRun {
     fn from_cursor_key(start: RunStart, cursor: CursorKey) -> Self {
@@ -63,6 +103,7 @@ impl TextRun {
             bg: start.bg,
             bg_alpha: start.bg_alpha,
             flags: start.flags,
+            data: None,
         }
     }
 
@@ -218,6 +259,7 @@ impl<I> TextRunIter<I> {
             bg: start.bg,
             bg_alpha: start.bg_alpha,
             flags: start.flags,
+            data: None,
         }
     }
 }
