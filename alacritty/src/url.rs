@@ -10,7 +10,7 @@ use alacritty_terminal::index::{Column, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Rgb;
 use alacritty_terminal::term::{RenderableCell, SizeInfo};
-use alacritty_terminal::text_run::*;
+use alacritty_terminal::text_run::{TextRun, TextRunContent};
 
 use crate::config::Config;
 use crate::event::Mouse;
@@ -202,34 +202,42 @@ mod tests {
 
     use alacritty_terminal::index::{Column, Line};
     use alacritty_terminal::term::cell::MAX_ZEROWIDTH_CHARS;
-    use alacritty_terminal::term::RenderableCellContent;
 
-    fn text_to_cells(text: &str) -> Vec<RenderableCell> {
-        text.chars()
-            .enumerate()
-            .map(|(i, c)| RenderableCell {
-                inner: RenderableCellContent::Chars([c; MAX_ZEROWIDTH_CHARS + 1]),
-                line: Line(0),
-                column: Column(i),
-                fg: Default::default(),
-                bg: Default::default(),
-                bg_alpha: 0.,
-                flags: Flags::empty(),
-            })
-            .collect()
+    fn text_to_text_run(start: usize, text: &str) -> TextRun {
+        let chars: String = text.chars().collect();
+        let extras = vec![[char::default(); MAX_ZEROWIDTH_CHARS]; chars.len()];
+        TextRun {
+            line: Line(0),
+            span: (Column(start), Column(chars.len() - 1 + start)),
+            content: TextRunContent::CharRun(chars, extras),
+            fg: Default::default(),
+            bg: Default::default(),
+            bg_alpha: 0.,
+            flags: Flags::empty(),
+            data: None,
+        }
+    }
+
+    fn text_to_text_runs(texts: &[&str]) -> (Vec<TextRun>, usize) {
+        let mut out = vec![];
+        let mut index = 0;
+        for text in texts {
+            let text_run = text_to_text_run(index, text);
+            out.push(text_run);
+            index += text.len();
+        }
+        (out, index)
     }
 
     #[test]
     fn multi_color_url() {
-        let mut input = text_to_cells("test https://example.org ing");
-        let num_cols = input.len();
-        input[10].fg = Rgb { r: 0xff, g: 0x00, b: 0xff };
-        let iter = TextRunIter::new(input.into_iter());
+        let (mut input, num_cols) = text_to_text_runs(&["test http", "s", "://example.org ing"]);
+        input[1].fg = Rgb { r: 0xff, g: 0x00, b: 0xff };
 
         let mut urls = Urls::new();
 
-        for text_run in iter {
-            urls.update(Column(num_cols), &text_run);
+        for text_run in input.iter() {
+            urls.update(Column(num_cols), text_run);
         }
 
         let url = urls.urls.first().unwrap();
@@ -239,14 +247,12 @@ mod tests {
 
     #[test]
     fn multiple_urls() {
-        let input = text_to_cells("test git:a git:b git:c ing");
-        let num_cols = input.len();
-        let iter = TextRunIter::new(input.into_iter());
+        let (input, num_cols) = text_to_text_runs(&["test git:a git:b git:c ing"]);
 
         let mut urls = Urls::new();
 
-        for text_run in iter {
-            urls.update(Column(num_cols), &text_run);
+        for text_run in &input {
+            urls.update(Column(num_cols), text_run);
         }
 
         assert_eq!(urls.urls.len(), 3);

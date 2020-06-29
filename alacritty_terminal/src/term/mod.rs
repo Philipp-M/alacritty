@@ -20,9 +20,9 @@ use crate::grid::{
 };
 use crate::index::{self, Column, IndexRange, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange};
-use crate::term::cell::{Cell, Flags, LineLength};
+use crate::term::cell::{Cell, Flags, LineLength, MAX_ZEROWIDTH_CHARS};
 use crate::term::color::{Rgb, DIM_FACTOR};
-use crate::text_run::TextRunIter;
+use crate::text_run::{RunStart, TextRun, TextRunContent};
 use crate::vi_mode::{ViModeCursor, ViMotion};
 
 pub mod cell;
@@ -191,6 +191,9 @@ pub struct CursorKey {
     pub is_wide: bool,
 }
 
+type IsWide = bool;
+type LatestCol = (Column, IsWide);
+
 /// Iterator that yields cells needing render.
 ///
 /// Yields cells that require work to be displayed (that is, not a an empty
@@ -199,16 +202,20 @@ pub struct CursorKey {
 ///
 /// This manages the cursor during a render. The cursor location is inverted to
 /// draw it, and reverted after drawing to maintain state.
-pub struct RenderableCellsIter<'a, C> {
+pub struct TextRunIter<'a, C> {
     inner: DisplayIter<'a, Cell>,
     grid: &'a Grid<Cell>,
     cursor: RenderableCursor,
     config: &'a Config<C>,
     colors: &'a color::List,
     selection: Option<SelectionRange<Line>>,
+    run_start: Option<RunStart>,
+    latest_col: Option<LatestCol>,
+    buffer_text: String,
+    buffer_extra: Vec<[char; MAX_ZEROWIDTH_CHARS]>,
 }
 
-impl<'a, C> RenderableCellsIter<'a, C> {
+impl<'a, C> TextRunIter<'a, C> {
     /// Create the renderable cells iterator.
     ///
     /// The cursor and terminal mode are required for properly displaying the
@@ -217,7 +224,7 @@ impl<'a, C> RenderableCellsIter<'a, C> {
         term: &'b Term<T>,
         config: &'b Config<C>,
         selection: Option<SelectionRange>,
-    ) -> RenderableCellsIter<'b, C> {
+    ) -> TextRunIter<'b, C> {
         let grid = &term.grid;
 
         let inner = grid.display_iter();
@@ -247,13 +254,124 @@ impl<'a, C> RenderableCellsIter<'a, C> {
             Some(SelectionRange::new(start, end, span.is_block))
         });
 
-        RenderableCellsIter {
+        TextRunIter {
             cursor: term.renderable_cursor(config),
             grid,
             inner,
             selection: selection_range,
             config,
             colors: &term.colors,
+            latest_col: None,
+            run_start: None,
+            buffer_text: String::new(),
+            buffer_extra: Vec::new(),
+        }
+    }
+
+    /// Check if current run ends at incoming Cell.
+    /// Run will not include incoming Cell if it ends.
+    fn is_end_of_run(&self, cell: &Indexed<Cell>, selected: bool) -> bool {
+        let does_cell_not_belong_to_run = self
+            .run_start
+            .as_ref()
+            .map(|run_start| !run_start.belongs_to_text_run(cell, selected))
+            .unwrap_or(false);
+        let is_col_not_adjacent = self
+            .latest_col
+            .as_ref()
+            .map(|&(col, is_wide)| {
+                let width = if is_wide { 2 } else { 1 };
+                col + width != cell.column && cell.column + width != col
+            })
+            .unwrap_or(false);
+        does_cell_not_belong_to_run || is_col_not_adjacent
+    }
+
+    /// Add content of cell to pending TextRun buffer
+    fn buffer_content(&mut self, cell: &Indexed<Cell>) {
+        // Render tab as spaces in case the font doesn't support it.
+        if cell.c == '\t' {
+            self.buffer_text.push(' ');
+        } else {
+            self.buffer_text.push(cell.c);
+        }
+        self.buffer_extra.push(cell.extra);
+    }
+
+    /// Empty out pending buffer producing owned collections that can be moved into a TextRun.
+    fn drain_buffer(&mut self) -> (String, Vec<[char; MAX_ZEROWIDTH_CHARS]>) {
+        (self.buffer_text.split_off(0), self.buffer_extra.split_off(0))
+    }
+
+    /// Start a new run by setting latest_col, run_start and buffering content of cell.
+    /// Returns the previous runs run_start and latest_col data if available.
+    fn start_run(
+        &mut self,
+        cell: Indexed<Cell>,
+        selected: bool,
+    ) -> (Option<RunStart>, Option<LatestCol>) {
+        self.buffer_content(&cell);
+        let latest = self.latest_col.replace((cell.column, cell.flags.contains(Flags::WIDE_CHAR)));
+        let start = self.run_start.replace(RunStart {
+            line: cell.line,
+            column: cell.column,
+            fg: cell.fg,
+            bg: cell.bg,
+            selected,
+            flags: cell.flags,
+        });
+        (start, latest)
+    }
+
+    /// Produce a run containing a single cursor from state of the `TextRunIter`.
+    /// This is a destructive operation, the iterator will be in a new run state after it's
+    /// completion.
+    fn produce_cursor(&mut self, cell: Indexed<Cell>, selected: bool) -> Option<TextRun> {
+        let start = RunStart {
+            line: cell.line,
+            column: cell.column,
+            fg: cell.fg,
+            bg: cell.bg,
+            flags: cell.flags,
+            selected,
+        };
+        let cursor = self.cursor.key;
+        let mut text_run = TextRun::from_cursor_key(self.config, self.colors, start, cursor);
+        if let Some(color) = self.cursor.cursor_color {
+            text_run.fg = color;
+        }
+        Some(text_run)
+    }
+
+    /// Create a run of chars from the current state of `TextRunIter`.
+    /// This is a destructive operation, the iterator will be in a new run state after it's
+    /// completion.
+    fn produce_char_run(&mut self, cell: Indexed<Cell>, selected: bool) -> Option<TextRun> {
+        let prev_buffer = self.drain_buffer();
+        let (start_opt, latest_col_opt) = self.start_run(cell, selected);
+        let start = start_opt?;
+        let latest_col = latest_col_opt?;
+        Some(self.build_text_run(start, latest_col, prev_buffer))
+    }
+
+    /// Build a TextRun instance from passed state of TextRunIter
+    fn build_text_run(
+        &self,
+        start: RunStart,
+        (latest, is_wide): LatestCol,
+        buffer: (String, Vec<[char; MAX_ZEROWIDTH_CHARS]>),
+    ) -> TextRun {
+        let end_column = if is_wide { latest + 1 } else { latest };
+        let (fg, bg, bg_alpha) = TextRun::color_to_rgb(self.config, self.colors, &start);
+        TextRun {
+            line: start.line,
+            span: (start.column, end_column),
+            content: TextRunContent::CharRun(buffer.0, buffer.1),
+            fg,
+            bg,
+            bg_alpha,
+            flags: start.flags,
+            data: None,
         }
     }
 
@@ -384,7 +502,12 @@ impl RenderableCell {
         }
     }
 
-    fn compute_fg_rgb<C>(config: &Config<C>, colors: &color::List, fg: Color, flags: Flags) -> Rgb {
+    pub fn compute_fg_rgb<C>(
+        config: &Config<C>,
+        colors: &color::List,
+        fg: Color,
+        flags: Flags,
+    ) -> Rgb {
         match fg {
             Color::Spec(rgb) => match flags & Flags::DIM {
                 Flags::DIM => rgb * DIM_FACTOR,
@@ -425,7 +548,7 @@ impl RenderableCell {
     }
 
     #[inline]
-    fn compute_bg_alpha(bg: Color) -> f32 {
+    pub fn compute_bg_alpha(bg: Color) -> f32 {
         if bg == Color::Named(NamedColor::Background) {
             0.
         } else {
@@ -434,7 +557,7 @@ impl RenderableCell {
     }
 
     #[inline]
-    fn compute_bg_rgb(colors: &color::List, bg: Color) -> Rgb {
+    pub fn compute_bg_rgb(colors: &color::List, bg: Color) -> Rgb {
         match bg {
             Color::Spec(rgb) => rgb,
             Color::Named(ansi) => colors[ansi],
@@ -443,8 +566,8 @@ impl RenderableCell {
     }
 }
 
-impl<'a, C> Iterator for RenderableCellsIter<'a, C> {
-    type Item = RenderableCell;
+impl<'a, C> Iterator for TextRunIter<'a, C> {
+    type Item = TextRun;
 
     /// Gets the next renderable cell.
     ///
@@ -452,6 +575,7 @@ impl<'a, C> Iterator for RenderableCellsIter<'a, C> {
     /// (eg. invert fg and bg colors).
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
+        let mut output = None;
         loop {
             if self.cursor.point.line == self.inner.line()
                 && self.cursor.point.col == self.inner.column()
@@ -460,50 +584,84 @@ impl<'a, C> Iterator for RenderableCellsIter<'a, C> {
 
                 // Handle cell below cursor.
                 if self.cursor.rendered {
-                    let mut cell =
-                        RenderableCell::new(self.config, self.colors, self.inner.next()?, selected);
-
-                    if self.cursor.key.style == CursorStyle::Block {
-                        mem::swap(&mut cell.bg, &mut cell.fg);
-
-                        if let Some(color) = self.cursor.text_color {
-                            cell.fg = color;
+                    if let Some(cell) = self.inner.next() {
+                        let mut start = RunStart {
+                            line: cell.line,
+                            column: cell.column,
+                            fg: cell.fg,
+                            bg: cell.bg,
+                            selected,
+                            flags: cell.flags,
+                        };
+                        if self.cursor.key.style == CursorStyle::Block {
+                            mem::swap(&mut start.bg, &mut start.fg);
+                            if let Some(color) = self.cursor.text_color {
+                                start.fg = Color::Spec(color);
+                            }
+                        } else if cell.is_empty() && !selected {
+                            continue;
                         }
+                        self.run_start = Some(start);
+                        self.latest_col =
+                            Some((cell.column, cell.flags.contains(Flags::WIDE_CHAR)));
+                        self.buffer_content(&cell);
                     }
-
-                    return Some(cell);
                 } else {
                     // Handle cursor.
+                    if !self.buffer_text.is_empty() || !self.buffer_extra.is_empty() {
+                        break;
+                    }
                     self.cursor.rendered = true;
-
                     let buffer_point = self.grid.visible_to_buffer(self.cursor.point);
                     let cell = Indexed {
                         inner: self.grid[buffer_point.line][buffer_point.col],
                         column: self.cursor.point.col,
                         line: self.cursor.point.line,
                     };
-
-                    let mut renderable_cell =
-                        RenderableCell::new(self.config, self.colors, cell, selected);
-
-                    renderable_cell.inner = RenderableCellContent::Cursor(self.cursor.key);
-
-                    if let Some(color) = self.cursor.cursor_color {
-                        renderable_cell.fg = color;
-                    }
-
-                    return Some(renderable_cell);
+                    output = self.produce_cursor(cell, selected);
+                    break;
                 }
-            } else {
-                let cell = self.inner.next()?;
-
+            } else if let Some(cell) = self.inner.next() {
                 let selected = self.is_selected(Point::new(cell.line, cell.column));
-
-                if !cell.is_empty() || selected {
-                    return Some(RenderableCell::new(self.config, self.colors, cell, selected));
+                if cell.is_empty() && !selected {
+                    continue;
                 }
+                if self.latest_col.is_none() || self.run_start.is_none() {
+                    // Initial state, this should only be hit on the first next() call of
+                    // iterator
+                    self.run_start = Some(RunStart {
+                        line: cell.line,
+                        column: cell.column,
+                        fg: cell.fg,
+                        bg: cell.bg,
+                        selected,
+                        flags: cell.flags,
+                    });
+                } else if self.is_end_of_run(&cell, selected) {
+                    // If we find a run break, return what we have so far and start a new run.
+                    output = self.produce_char_run(cell, selected);
+                    break;
+                }
+                // Build up buffer and track the latest column we've seen
+                self.latest_col = Some((cell.column, cell.flags.contains(Flags::WIDE_CHAR)));
+                self.buffer_content(&cell);
+            } else {
+                break;
             }
         }
+        // Check for any remaining buffered content and return it as a text run.
+        // This is a destructive operation, it will return None after it executes once.
+        output.or_else(|| {
+            if !self.buffer_text.is_empty() || !self.buffer_extra.is_empty() {
+                let start = self.run_start.take()?;
+                let latest_col = self.latest_col.take()?;
+                // Save leftover buffer and empty it
+                let prev_buffered = self.drain_buffer();
+                Some(self.build_text_run(start, latest_col, prev_buffered))
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -1029,26 +1187,13 @@ impl<T> Term<T> {
         &mut self.grid
     }
 
-    /// Iterate over the *renderable* cells in the terminal.
-    ///
-    /// A renderable cell is any cell which has content other than the default
-    /// background color.  Cells with an alternate background color are
-    /// considered renderable as are cells with any text content.
-    pub fn renderable_cells<'b, C>(&'b self, config: &'b Config<C>) -> RenderableCellsIter<'_, C> {
-        let selection = self.selection.as_ref().and_then(|s| s.to_range(self));
-
-        RenderableCellsIter::new(&self, config, selection)
-    }
-
     /// Iterate over the text runs in the terminal
     ///
     /// A text run is a continuous line of cells that all share the same rendering properties
     /// (background color, foreground color, etc.).
-    pub fn text_runs<'b, C>(
-        &'b self,
-        config: &'b Config<C>,
-    ) -> TextRunIter<RenderableCellsIter<'_, C>> {
-        TextRunIter::new(self.renderable_cells(config))
+    pub fn text_runs<'b, C>(&'b self, config: &'b Config<C>) -> TextRunIter<'_, C> {
+        let selection = self.selection.as_ref().and_then(|s| s.to_range(self));
+        TextRunIter::new(&self, config, selection)
     }
 
     /// Resize terminal to new dimensions.
