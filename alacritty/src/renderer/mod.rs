@@ -1199,14 +1199,14 @@ impl<'a, C> RenderApi<'a, C> {
     #[cfg(not(any(target_os = "macos", windows)))]
     pub fn render_text_run_with_data(
         &mut self,
-        text_run: &TextRun,
+        text_run: &mut TextRun,
         glyph_cache: &mut GlyphCache,
-    ) -> Option<Vec<(RenderableCell, Glyph)>> {
+    ) {
         if let Some(data) = &text_run.data {
             for (cell, glyph) in data {
                 self.add_render_item(&cell, &glyph);
             }
-            return None;
+            return;
         }
         let mut cell = text_run.start_cell();
         let mut result = vec![];
@@ -1214,7 +1214,6 @@ impl<'a, C> RenderApi<'a, C> {
             TextRunContent::Cursor(cursor_key) => {
                 let (cell, glyph) = self.render_cursor_with_data(&cell, *cursor_key, glyph_cache);
                 result.push((cell, glyph));
-                Some(result)
             },
             TextRunContent::CharRun(run, zero_widths) => {
                 // Get font key for cell
@@ -1234,7 +1233,6 @@ impl<'a, C> RenderApi<'a, C> {
                         result.extend(zw);
                         cell.column += step;
                     }
-                    Some(result)
                 } else {
                     let mut key = GlyphKey { id: 0.into(), font_key, size: glyph_cache.font_size };
                     let mut iter = zero_widths.iter();
@@ -1278,7 +1276,6 @@ impl<'a, C> RenderApi<'a, C> {
                             result.extend(zw);
                             cell.column += step;
                         }
-                        Some(result)
                     } else {
                         for c in run.chars() {
                             let zero_width_chars = iter.next().unwrap();
@@ -1295,11 +1292,11 @@ impl<'a, C> RenderApi<'a, C> {
                             result.extend(zw);
                             cell.column += step;
                         }
-                        Some(result)
                     }
                 }
             },
         }
+        text_run.data = Some(result);
     }
 }
 

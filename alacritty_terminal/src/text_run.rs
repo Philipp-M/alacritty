@@ -179,4 +179,3 @@ impl TextRun {
         Point { line: self.line, col: self.span.1 }
     }
 }
-
