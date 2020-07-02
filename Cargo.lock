@@ -29,6 +29,7 @@ dependencies = [
  "glutin",
  "image",
  "libc",
+ "linked-hash-map",
  "log",
  "notify",
  "parking_lot",
