@@ -362,7 +362,7 @@ impl<'a, C> TextRunIter<'a, C> {
         buffer: (String, Vec<[char; MAX_ZEROWIDTH_CHARS]>),
     ) -> TextRun {
         let end_column = if is_wide { latest + 1 } else { latest };
-        let (fg, bg, bg_alpha) = TextRun::color_to_rgb(self.config, self.colors, &start);
+        let (fg, bg, bg_alpha) = RenderableCell::color_to_rgb(self.config, self.colors, &start);
         TextRun {
             line: start.line,
             span: (start.column, end_column),
@@ -450,23 +450,23 @@ pub struct RenderableCell {
 }
 
 impl RenderableCell {
-    fn new<C>(
+    #[inline]
+    pub fn color_to_rgb<C>(
         config: &Config<C>,
         colors: &color::List,
-        cell: Indexed<Cell>,
-        selected: bool,
-    ) -> Self {
+        cell: &RunStart,
+    ) -> (Rgb, Rgb, f32) {
         // Lookup RGB values.
         let mut fg_rgb = Self::compute_fg_rgb(config, colors, cell.fg, cell.flags);
         let mut bg_rgb = Self::compute_bg_rgb(colors, cell.bg);
         let mut bg_alpha = Self::compute_bg_alpha(cell.bg);
 
         let selection_background = config.colors.selection.background;
-        if let (true, Some(col)) = (selected, selection_background) {
+        if let (true, Some(col)) = (cell.selected, selection_background) {
             // Override selection background with config colors.
             bg_rgb = col;
             bg_alpha = 1.0;
-        } else if selected ^ cell.inverse() {
+        } else if cell.selected ^ cell.flags.contains(Flags::INVERSE) {
             if fg_rgb == bg_rgb && !cell.flags.contains(Flags::HIDDEN) {
                 // Reveal inversed text when fg/bg is the same.
                 fg_rgb = colors[NamedColor::Background];
@@ -480,28 +480,14 @@ impl RenderableCell {
         }
 
         // Override selection text with config colors.
-        if let (true, Some(col)) = (selected, config.colors.selection.text) {
+        if let (true, Some(col)) = (cell.selected, config.colors.selection.text) {
             fg_rgb = col;
         }
 
-        RenderableCell {
-            line: cell.line,
-            column: cell.column,
-            inner: RenderableCellContent::Chars(cell.chars()),
-            fg: fg_rgb,
-            bg: bg_rgb,
-            bg_alpha,
-            flags: cell.flags,
-        }
+        (fg_rgb, bg_rgb, bg_alpha)
     }
 
-    pub fn is_cursor(&self) -> bool {
-        match &self.inner {
-            RenderableCellContent::Cursor(_) => true,
-            _ => false,
-        }
-    }
-
+    #[inline]
     pub fn compute_fg_rgb<C>(
         config: &Config<C>,
         colors: &color::List,
@@ -596,7 +582,10 @@ impl<'a, C> Iterator for TextRunIter<'a, C> {
                         if self.cursor.key.style == CursorStyle::Block {
                             mem::swap(&mut start.bg, &mut start.fg);
                             if let Some(color) = self.cursor.text_color {
-                                start.fg = Color::Spec(color);
+                                start.fg = match cell.flags & Flags::DIM {
+                                    Flags::DIM => Color::Spec(color / DIM_FACTOR),
+                                    _ => Color::Spec(color),
+                                };
                             }
                         } else if cell.is_empty() && !selected {
                             continue;
@@ -605,6 +594,8 @@ impl<'a, C> Iterator for TextRunIter<'a, C> {
                         self.latest_col =
                             Some((cell.column, cell.flags.contains(Flags::WIDE_CHAR)));
                         self.buffer_content(&cell);
+                    } else {
+                        break;
                     }
                 } else {
                     // Handle cursor.

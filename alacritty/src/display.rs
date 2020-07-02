@@ -480,60 +480,12 @@ impl Display {
                         {
                             if let Some(text_run_with_data) = text_run_cache.get(&text_run) {
                                 hit += 1;
-                                if let Some(data) = &text_run_with_data.data {
-                                    let mut data = data.clone();
-                                    if text_run_with_data.line != text_run.line {
-                                        for (cell, _) in &mut data {
-                                            cell.line = text_run.line;
-                                        }
-                                    }
-                                    let start = text_run_with_data.span.0;
-                                    if start != text_run.span.0 {
-                                        for (cell, _) in &mut data {
-                                            cell.column = text_run.span.0 + cell.column - start;
-                                        }
-                                    }
-                                    if text_run_with_data.fg != text_run.fg {
-                                        for (cell, _) in &mut data {
-                                            cell.fg = text_run.fg;
-                                        }
-                                    }
-                                    if text_run_with_data.bg != text_run.bg {
-                                        for (cell, _) in &mut data {
-                                            cell.bg = text_run.bg;
-                                        }
-                                    }
-                                    text_run.data = Some(data);
-                                }
+                                text_run.update_from_data(text_run_with_data);
                                 api.render_text_run_with_data(&mut text_run, glyph_cache);
                                 new_set.insert(text_run);
                             } else if let Some(text_run_with_data) = new_set.get(&text_run) {
                                 hit += 1;
-                                if let Some(data) = &text_run_with_data.data {
-                                    let mut data = data.clone();
-                                    if text_run_with_data.line != text_run.line {
-                                        for (cell, _) in &mut data {
-                                            cell.line = text_run.line;
-                                        }
-                                    }
-                                    let start = text_run_with_data.span.0;
-                                    if start != text_run.span.0 {
-                                        for (cell, _) in &mut data {
-                                            cell.column = text_run.span.0 + cell.column - start;
-                                        }
-                                    }
-                                    if text_run_with_data.fg != text_run.fg {
-                                        for (cell, _) in &mut data {
-                                            cell.fg = text_run.fg;
-                                        }
-                                    }
-                                    if text_run_with_data.bg != text_run.bg {
-                                        for (cell, _) in &mut data {
-                                            cell.bg = text_run.bg;
-                                        }
-                                    }
-                                    text_run.data = Some(data);
-                                }
+                                text_run.update_from_data(text_run_with_data);
                                 api.render_text_run_with_data(&mut text_run, glyph_cache);
                             } else {
                                 api.render_text_run_with_data(&mut text_run, glyph_cache);

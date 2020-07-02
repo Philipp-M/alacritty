@@ -1104,21 +1104,21 @@ impl<'a, C> RenderApi<'a, C> {
         &mut self,
         zero_width_chars: I,
         cell: &RenderableCell,
-        font_key: FontKey,
+        glyph_key: &mut GlyphKey,
         glyph_cache: &mut GlyphCache,
     ) where
         I: Iterator<Item = &'r char>,
     {
         let average_advance = glyph_cache.metrics.average_advance as f32;
         for c in zero_width_chars {
-            let glyph_key = GlyphKey { font_key, size: glyph_cache.font_size, id: (*c).into() };
-            let mut glyph = *glyph_cache.get(glyph_key, self);
+            let mut glyph = *glyph_cache.get(*glyph_key, self);
 
             // The metrics of zero-width characters are based on rendering
             // the character after the current cell, with the anchor at the
             // right side of the preceding character. Since we render the
             // zero-width characters inside the preceding character, the
             // anchor has been moved to the right by one cell.
+            glyph_key.id = (*c).into();
             glyph.left += average_advance;
             self.add_render_item(cell, &glyph);
         }
@@ -1129,7 +1129,7 @@ impl<'a, C> RenderApi<'a, C> {
         &mut self,
         zero_width_chars: I,
         cell: &RenderableCell,
-        font_key: FontKey,
+        glyph_key: &mut GlyphKey,
         glyph_cache: &mut GlyphCache,
     ) -> Vec<(RenderableCell, Glyph)>
     where
@@ -1138,14 +1138,13 @@ impl<'a, C> RenderApi<'a, C> {
         let average_advance = glyph_cache.metrics.average_advance as f32;
         let mut result = vec![];
         for c in zero_width_chars {
-            let glyph_key = GlyphKey { font_key, size: glyph_cache.font_size, id: (*c).into() };
-            let mut glyph = *glyph_cache.get(glyph_key, self);
-
+            let mut glyph = *glyph_cache.get(*glyph_key, self);
             // The metrics of zero-width characters are based on rendering
             // the character after the current cell, with the anchor at the
             // right side of the preceding character. Since we render the
             // zero-width characters inside the preceding character, the
             // anchor has been moved to the right by one cell.
+            glyph_key.id = (*c).into();
             glyph.left += average_advance;
             self.add_render_item(cell, &glyph);
             result.push((*cell, glyph));
@@ -1163,6 +1162,7 @@ impl<'a, C> RenderApi<'a, C> {
                 // Get font key for cell
                 let font_key = Self::determine_font_key(text_run.flags, glyph_cache);
                 let step = if text_run.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+                let mut key = GlyphKey { id: 0.into(), font_key, size: glyph_cache.font_size };
                 if text_run.flags.contains(Flags::HIDDEN) {
                     let glyph = Glyph::default();
                     for zero_width_chars in zero_widths.iter() {
@@ -1170,13 +1170,12 @@ impl<'a, C> RenderApi<'a, C> {
                         self.render_zero_widths(
                             zero_width_chars.iter().filter(|c| **c != ' '),
                             &cell,
-                            font_key,
+                            &mut key,
                             glyph_cache,
                         );
                         cell.column += step;
                     }
                 } else {
-                    let mut key = GlyphKey { id: 0.into(), font_key, size: glyph_cache.font_size };
                     let mut iter = zero_widths.iter();
                     for c in run.chars() {
                         let zero_width_chars = iter.next().unwrap();
@@ -1186,7 +1185,7 @@ impl<'a, C> RenderApi<'a, C> {
                         self.render_zero_widths(
                             zero_width_chars.iter().filter(|c| **c != ' '),
                             &cell,
-                            font_key,
+                            &mut key,
                             glyph_cache,
                         );
                         cell.column += step;
@@ -1219,6 +1218,7 @@ impl<'a, C> RenderApi<'a, C> {
                 // Get font key for cell
                 let font_key = Self::determine_font_key(text_run.flags, glyph_cache);
                 let step = if text_run.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+                let mut key = GlyphKey { id: 0.into(), font_key, size: glyph_cache.font_size };
                 if text_run.flags.contains(Flags::HIDDEN) {
                     let glyph = Glyph::default();
                     for zero_width_chars in zero_widths.iter() {
@@ -1227,14 +1227,13 @@ impl<'a, C> RenderApi<'a, C> {
                         let zw = self.render_zero_widths_with_data(
                             zero_width_chars.iter().filter(|c| **c != ' '),
                             &cell,
-                            font_key,
+                            &mut key,
                             glyph_cache,
                         );
                         result.extend(zw);
                         cell.column += step;
                     }
                 } else {
-                    let mut key = GlyphKey { id: 0.into(), font_key, size: glyph_cache.font_size };
                     let mut iter = zero_widths.iter();
                     if run.len() > 1 && run.trim().len() > 1 {
                         let mut chars = vec![None; run.len()];
@@ -1270,7 +1269,7 @@ impl<'a, C> RenderApi<'a, C> {
                             let zw = self.render_zero_widths_with_data(
                                 zero_width_chars.iter().filter(|c| **c != ' '),
                                 &cell,
-                                font_key,
+                                &mut key,
                                 glyph_cache,
                             );
                             result.extend(zw);
@@ -1286,7 +1285,7 @@ impl<'a, C> RenderApi<'a, C> {
                             let zw = self.render_zero_widths_with_data(
                                 zero_width_chars.iter().filter(|c| **c != ' '),
                                 &cell,
-                                font_key,
+                                &mut key,
                                 glyph_cache,
                             );
                             result.extend(zw);

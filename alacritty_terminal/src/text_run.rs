@@ -1,7 +1,7 @@
 use std::cmp::{Eq, PartialEq};
 use std::hash::{Hash, Hasher};
 
-use crate::ansi::{Color, NamedColor};
+use crate::ansi::Color;
 use crate::config::Config;
 use crate::gl::types::*;
 use crate::grid::Indexed;
@@ -80,7 +80,6 @@ impl Hash for TextRun {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (self.span.1 - self.span.0).hash(state);
         self.content.hash(state);
-        self.bg_alpha.to_bits().hash(state);
         self.flags.hash(state);
     }
 }
@@ -89,7 +88,6 @@ impl PartialEq for TextRun {
     fn eq(&self, other: &Self) -> bool {
         (self.span.1 - self.span.0) == (other.span.1 - other.span.0)
             && self.content == other.content
-            && self.bg_alpha.to_bits() == other.bg_alpha.to_bits()
             && self.flags == other.flags
     }
 }
@@ -103,7 +101,7 @@ impl TextRun {
         start: RunStart,
         cursor: CursorKey,
     ) -> Self {
-        let (fg, bg, bg_alpha) = Self::color_to_rgb(config, colors, &start);
+        let (fg, bg, bg_alpha) = RenderableCell::color_to_rgb(config, colors, &start);
         TextRun {
             line: start.line,
             span: (start.column, start.column),
@@ -117,41 +115,42 @@ impl TextRun {
     }
 
     #[inline]
-    pub fn color_to_rgb<C>(
-        config: &Config<C>,
-        colors: &color::List,
-        start: &RunStart,
-    ) -> (Rgb, Rgb, f32) {
-        // Lookup RGB values.
-        let mut fg = RenderableCell::compute_fg_rgb(config, colors, start.fg, start.flags);
-        let mut bg = RenderableCell::compute_bg_rgb(colors, start.bg);
-        let mut bg_alpha = RenderableCell::compute_bg_alpha(start.bg);
-
-        let selection_background = config.colors.selection.background;
-        if let (true, Some(col)) = (start.selected, selection_background) {
-            // Override selection background with config colors.
-            bg = col;
-            bg_alpha = 1.0;
-        } else if start.selected ^ start.flags.contains(Flags::INVERSE) {
-            if fg == bg && !start.flags.contains(Flags::HIDDEN) {
-                // Reveal inserved text when fg/bg is the same.
-                fg = colors[NamedColor::Background];
-                bg = colors[NamedColor::Foreground];
-            } else {
-                // Invert cell fg and bg colors.
-                std::mem::swap(&mut fg, &mut bg);
+    pub fn update_from_data(&mut self, other: &Self) {
+        if let Some(data) = &other.data {
+            let mut data = data.clone();
+            if other.line != self.line {
+                for (cell, _) in &mut data {
+                    cell.line = self.line;
+                }
             }
-
-            bg_alpha = 1.0;
+            let start = other.span.0;
+            if start != self.span.0 {
+                for (cell, _) in &mut data {
+                    cell.column = self.span.0 + cell.column - start;
+                }
+            }
+            if other.fg != self.fg {
+                for (cell, _) in &mut data {
+                    cell.fg = self.fg;
+                }
+            }
+            if other.bg != self.bg {
+                for (cell, _) in &mut data {
+                    cell.bg = self.bg;
+                }
+            }
+            if other.bg_alpha.to_bits() != self.bg_alpha.to_bits() {
+                for (cell, _) in &mut data {
+                    cell.bg_alpha = self.bg_alpha;
+                }
+            }
+            self.data = Some(data);
         }
-        if let (true, Some(col)) = (start.selected, config.colors.selection.text) {
-            fg = col;
-        }
-        (fg, bg, bg_alpha)
     }
 
     /// Returns dummy RenderableCell containing no content with positioning and color information
     /// from this TextRun.
+    #[inline]
     fn dummy_cell_at(&self, col: Column) -> RenderableCell {
         RenderableCell {
             line: self.line,
@@ -165,16 +164,19 @@ impl TextRun {
     }
 
     /// First cell in the TextRun
+    #[inline]
     pub fn start_cell(&self) -> RenderableCell {
         self.dummy_cell_at(self.span.0)
     }
 
     /// First point covered by this TextRun
+    #[inline]
     pub fn start_point(&self) -> Point {
         Point { line: self.line, col: self.span.0 }
     }
 
     /// End point covered by this TextRun
+    #[inline]
     pub fn end_point(&self) -> Point {
         Point { line: self.line, col: self.span.1 }
     }
