@@ -24,7 +24,7 @@ time = "0.1.40"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.8"
 serde_json = "1"
-glutin = { version = "0.26.0", default-features = false, features = ["serde"] }
+glutin = { git = "https://github.com/Philipp-M/glutin.git", branch = "mod-fix", features = ["serde"], default-features = false }
 notify = "4"
 parking_lot = "0.11.0"
 crossfont = { version = "0.2.0", features = ["force_system_fontconfig"] }
